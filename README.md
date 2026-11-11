@@ -2,21 +2,33 @@
 
 # 长文翻译器
 
-**连接你自己的模型，把 TXT / Markdown 长文按段翻译、对照检查，并在中断后继续。**
+**本地书籍与长文翻译工作台：连接你自己的模型，用网页、CLI 或 MCP 翻译 TXT / Markdown。**
 
-浏览器里手动控制，或把书交给 Hermes Agent 自动执行。
+可以手动对照检查，也可以让同机 Agent 提交书籍、跟踪进度、恢复任务并领取译稿。
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?style=flat-square&logo=fastapi&logoColor=white)
 ![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=20232A)
 ![Vite](https://img.shields.io/badge/Vite-5-646CFF?style=flat-square&logo=vite&logoColor=white)
 
-一个本地运行的多语言长文翻译工作台，适合书籍、学习资料、技术文档和双语内容整理。
+适合书籍、学习资料、技术文档和双语内容整理；支持术语与风格设置、按段保存和中断续跑。
 
 </div>
 
 > [!IMPORTANT]
 > 任务、配置和结果保存在本机；开始翻译后，原文以及已启用的术语、整体要求和风格参考会发送到你配置的模型服务。
+
+## 选择使用入口
+
+| 入口 | 适合的使用方式 |
+| --- | --- |
+| 网页工作台 | 配置模型与术语，上传书籍，查看原文 / 译文对照并控制进度 |
+| CLI | 在终端或脚本中执行翻译，使用 `--resume` 继续未完成任务 |
+| Agent + MCP | 让支持本地 stdio MCP 的 Agent 提交、查询、暂停、继续、取消任务并下载译稿；不绑定某个 Agent 产品 |
+
+Hermes 用户也可以使用项目附带的 Skill。网页、MCP 和 Hermes Skill 共用后端任务；CLI 在自身进程中执行翻译，请避免同时用 CLI 与后端运行同一任务。
+
+当前直接接受 TXT / Markdown。PDF、EPUB、DOCX 和扫描书需先转换，项目尚未内置 OCR。
 
 ## 为什么用它
 
@@ -24,28 +36,34 @@
 | --- | --- |
 | 可配置模型接口 | 在页面填写 URL、API Key 和模型名称，不把应用绑定到单一服务商 |
 | 多语言原文 | 模型按提示判断原文语言，目标语言支持中文、日语、韩语或自定义 |
-| 长文续跑 | 按段保存进度，支持暂停、继续和失败重试，已完成段落不会重复请求 |
+| 长文续跑 | 按段保存进度，支持暂停、继续和失败重试，续跑复用已保存的成功译文 |
 | 可控翻译 | 提供忠实直译、自然阅读、专业表达、润色程度和翻译速度设置 |
 | 术语与风格 | 逐条添加固定译法、整体要求和风格参考，让长文表达更一致 |
 | 对照与导出 | 原文 / 译文双栏检查，可导出译文或双语版 TXT、Markdown |
-| Hermes Agent 控制 | 把书发给 Hermes，由 Agent 提交、查进度、续跑并下载译稿 |
+| Agent 自动执行 | 提供标准 MCP 接口与 Hermes Skill，由 Agent 提交、查进度、续跑并下载译稿 |
+| 任务与文件保护 | Agent 重复提交相同内容和参数可复用任务；MCP 限定书籍目录，下载校验大小与 SHA-256，并防止覆盖已有文件 |
 
 ## 从原稿到译稿
 
 ```mermaid
 flowchart LR
-    A[TXT / Markdown] --> B[自动分段]
+    A[TXT / Markdown] --> Entry[网页 / CLI / Agent]
+    Entry --> B[自动分段]
     B --> C[术语 + 整体要求 + 风格参考]
     C --> D[兼容 OpenAI Chat Completions 的文本模型]
     D --> E[段落对齐与进度落盘]
     E --> F[译文 / 双语 TXT、Markdown]
 ```
 
+给 Agent 的典型任务是：“把书籍目录里的 book.md 翻译成简体中文，使用忠实翻译，完成后给我双语 Markdown。”Agent 通过 MCP 检查服务、提交任务、记录任务编号、查询或恢复进度，最后下载译稿。翻译由独立后端执行，关闭 MCP 连接不会取消任务；后端需要保持运行。附件回传取决于 Agent 客户端是否支持。
+
+直接接入 Agent，请看下方的 [MCP 配置与使用说明](#mcp让本地-agent-控制翻译)。首次使用也可以先按快速开始运行网页，完成模型配置。
+
 ## 快速开始
 
 环境要求：
 
-- Python 3.10+
+- Python 3.10+；MCP 与 Hermes Skill 控制脚本使用 Python 3.11+
 - Node.js 18+
 
 先运行 `python3 --version`（Windows 使用 `python --version`）确认版本。如果低于 3.10，请把下面命令中的解释器替换为本机已安装的 `python3.10`、`python3.11` 或更高版本。
@@ -262,6 +280,73 @@ Hermes 会获得一个持久化的 `job_id`。相同文件和相同参数被重�
 
 当前 Skill 只接受 TXT 和 Markdown。PDF、EPUB、DOCX 需要先转换成文本或 Markdown；扫描版 PDF 还需要 OCR。
 
+## MCP：让本地 Agent 控制翻译
+
+MCP 入口使用 [官方 Python SDK](https://py.sdk.modelcontextprotocol.io/)，要求 Python 3.11+。第一版采用 **同机 stdio MCP → 已启动的翻译后端 → 已配置的翻译模型**。MCP 不直接运行第二套翻译流水线；关闭 Agent 或 MCP 连接后，独立运行的后端仍会继续任务。电脑休眠、退出后端或关机则会中断执行，恢复后需要 Agent 调用继续。
+
+### 安装和连接
+
+在项目虚拟环境中安装可选依赖：
+
+```bash
+python -m pip install -r requirements-mcp.txt
+```
+
+先按前文在页面配置模型，再单独启动后端（一个 worker，不使用 `--reload`）：
+
+```bash
+python -m uvicorn backend.app:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+准备一个专门存放书籍的现有目录。在支持 stdio MCP 的 Agent 客户端中增加下列服务器配置，把三个绝对路径换成自己的路径；Windows 的 Python 位于 `.venv/Scripts/python.exe`。
+
+```json
+{
+  "mcpServers": {
+    "book-translator": {
+      "command": "/absolute/path/text-book-translator/.venv/bin/python",
+      "args": [
+        "/absolute/path/text-book-translator/mcp_server.py",
+        "--workspace", "/absolute/path/books",
+        "--api-url", "http://127.0.0.1:8000"
+      ]
+    }
+  }
+}
+```
+
+以上是通用 JSON 配置示例；具体客户端可能使用不同的配置文件结构。Python 和脚本必须使用绝对路径，无需传模型 API Key。MCP 服务只接受本机 HTTP 后端地址，不能用此配置开放远程访问。后端应始终绑定回环地址。
+
+### 给 Agent 的任务示例
+
+把 UTF-8 的 `book.md` 放进上述书籍目录，告诉 Agent：
+
+> 把书籍目录里的 book.md 翻译成简体中文，使用忠实翻译和稳定速度。先检查服务，再提交任务，记录任务编号并检查进度；遇到失败先查看原因，不要无限重试。完成后下载双语 Markdown，把文件交给我。
+
+如果通过聊天附件传书，Agent 客户端需要先将附件保存到 `--workspace` 指定目录。MCP 本身不会读取聊天附件，也不会替客户端发送文件。
+
+| MCP 工具 | 用途 |
+| --- | --- |
+| `translator_preflight` | 检查服务和模型是否已配置；不调用模型，也不验证额度和真实连通性 |
+| `submit_translation` | 提交或复用任务，立即返回 `job_id`；支持目标语言、表达模式、润色程度、已有语料库及速度 |
+| `get_translation_status` | 查看进度、错误、执行器是否存活及结果清单 |
+| `pause_translation` | 请求暂停，当前批次保存后生效 |
+| `resume_translation` | 继续未完成任务，或恢复后端重启后的任务 |
+| `cancel_translation` | 终止任务；相同文件和参数再次提交仍会匹配这个已取消任务 |
+| `download_translation` | 校验大小及 SHA-256 后保存译稿，返回本机路径；默认双语 Markdown |
+
+后续操作必须明确传入 `job_id`，不会自动操作“最近一本书”。建议每隔约 10 秒查询状态；等待和断开连接不会取消后台任务。`result_ready` 表示可下载，**只有 `status=completed` 才是处理完成**；暂停、失败、取消的可用结果仍是部分译稿。程序处理完成也不等于经过翻译质量校对。
+
+### 当前边界
+
+- 输入仅限 UTF-8 `.txt` / `.md`，单文件不超过 20 MiB；EPUB、文字 PDF、扫描 PDF 和 DOCX 尚需另行转换。
+- 输入与输出路径必须位于 `--workspace` 内，越界路径和指向外部的符号链接会被拒绝。默认下载到该目录的 `outputs/`，已有文件不会覆盖。
+- 任务索引写入书籍目录的 `.translator-state/jobs.json`，不修改 Hermes 的默认任务索引；完整进度仍由后端存储。
+- 开始与继续翻译会使用现有模型配置并可能产生费用，目前没有整本书的预算硬上限。
+- 默认使用稳定速度。已知并发模式在批次存在漏段时可能重新请求同批已译段，尚待逐段保存优化。
+- 相同文件与显式参数会复用旧任务。仅更换模型或修改语料内容不会自动重翻；需要明确重翻时请在页面新建任务。
+- 当前不支持远程鉴权、书籍 OCR、自动术语提取、预算控制或译文质量审核。
+
 ## 技术栈
 
 - 前端：React 18 + Vite 5
@@ -280,6 +365,8 @@ python -m compileall -q backend tests integrations/hermes/book-translator
 cd frontend
 npm run build
 ```
+
+安装可选 MCP 依赖后，运行 `python -m unittest discover -s tests -p 'test_mcp*.py' -v` 可验证真实 stdio 握手、工具调用和文件交付。其中全链路测试连接真实后端与翻译流程，并验证 Agent 断开后后台继续执行；配置和文件全部隔离，模型使用测试替身，不调用付费模型。
 
 ## 反馈
 

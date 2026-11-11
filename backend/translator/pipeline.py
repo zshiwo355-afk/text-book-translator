@@ -292,10 +292,10 @@ class TranslationPipeline:
         config = reload_config()
         if not config.tokenhub_api_key.strip():
             raise ValueError("模型接口的 API Key 未配置，请检查页面配置、.env 或 backend/config.local.json")
-        await self.storage.clear_result_manifest(job_id)
-        job.config.model = config.model
         segments = await self.storage.load_segments(job_id)
         chunks = await self.storage.load_chunks(job_id)
+        await self.storage.clear_result_manifest(job_id)
+        job.config.model = config.model
         changed = self.normalize_interrupted_segments(segments, chunks)
         if changed:
             await self.storage.save_segments(job_id, segments)
@@ -335,10 +335,10 @@ class TranslationPipeline:
             return job
         if not self._cleanup_finished_task(job_id):
             return job
-        await self.storage.clear_result_manifest(job_id)
-        job.config.model = reload_config().model
         segments = await self.storage.load_segments(job_id)
         chunks = await self.storage.load_chunks(job_id)
+        await self.storage.clear_result_manifest(job_id)
+        job.config.model = reload_config().model
         if all(segment.status == "success" for segment in segments):
             job.status = "completed"
             job.current_segment_id = ""

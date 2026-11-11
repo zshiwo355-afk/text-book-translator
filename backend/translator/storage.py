@@ -11,11 +11,16 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
+from pydantic import ValidationError
 
 from backend.translator.validator import ChunkRecord, JobRecord, LogEntry, SegmentRecord, ensure_list
 
 
 logger = logging.getLogger(__name__)
+
+
+class StorageIntegrityError(ValueError):
+    pass
 
 
 class FileStorage:
@@ -118,43 +123,15 @@ class FileStorage:
         cache_key = self._cache_key(path)
         backup_path = path.with_suffix(path.suffix + ".bak")
 
-        async def try_read(target: Path) -> Any:
-            async with aiofiles.open(target, "r", encoding="utf-8") as file:
-                content = await file.read()
-            if not content.strip():
-                raise ValueError("empty-json")
-            return json.loads(content)
-
-        try:
-            if not path.exists():
-                logger.warning("JSON file missing: %s", path)
-                return default
-            payload = await try_read(path)
-            self.json_cache[cache_key] = payload
-            return payload
-        except json.JSONDecodeError as exc:
-            logger.warning("JSON decode failed for %s: %s", path, exc)
-            if backup_path.exists():
-                try:
-                    payload = await try_read(backup_path)
-                    self.json_cache[cache_key] = payload
-                    return payload
-                except Exception as backup_exc:
-                    logger.warning("JSON backup read failed for %s: %s", backup_path, backup_exc)
-            return default
-        except ValueError as exc:
-            logger.warning("JSON file empty while reading %s: %s", path, exc)
-            if backup_path.exists():
-                try:
-                    payload = await try_read(backup_path)
-                    self.json_cache[cache_key] = payload
-                    return payload
-                except Exception as backup_exc:
-                    logger.warning("JSON backup read failed for %s: %s", backup_path, backup_exc)
-            return default
-        except Exception as exc:
-            logger.warning("JSON read failed for %s: %s", path, exc)
-            return default
+        for target in (path, backup_path):
+            try:
+                async with aiofiles.open(target, "r", encoding="utf-8") as file:
+                    payload = json.loads(await file.read())
+                self.json_cache[cache_key] = payload
+                return payload
+            except Exception as exc:
+                logger.warning("JSON read failed for %s: %s", target, exc)
+        return default
 
     async def save_uploaded_file(self, file_name: str, content: bytes, job_id: str) -> Path:
         await self.ensure_base_dirs()
@@ -224,8 +201,18 @@ class FileStorage:
             await self._write_json(self.segments_json_path(job_id), [segment.model_dump() for segment in segments])
 
     async def load_segments(self, job_id: str) -> list[SegmentRecord]:
-        data = await self._read_json(self.segments_json_path(job_id), default=[])
-        return [SegmentRecord(**item) for item in data]
+        data = await self._read_json(self.segments_json_path(job_id))
+        error_message = f"任务 {job_id} 的段落进度文件缺失、损坏或不完整，无法安全继续；请恢复 segments.json 或其备份。"
+        if not isinstance(data, list) or not data:
+            raise StorageIntegrityError(error_message)
+        try:
+            segments = [SegmentRecord.model_validate(item) for item in data]
+        except ValidationError as exc:
+            raise StorageIntegrityError(error_message) from exc
+        job = await self.load_job(job_id)
+        if len(segments) != job.total_segments:
+            raise StorageIntegrityError(error_message)
+        return segments
 
     async def save_chunk(self, job_id: str, chunk: ChunkRecord) -> None:
         async with self._get_lock(job_id):

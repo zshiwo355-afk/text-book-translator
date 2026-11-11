@@ -1,0 +1,2 @@
+# Optional local MCP adapter; the Web app and existing CLI do not need this.
+mcp==2.3.0

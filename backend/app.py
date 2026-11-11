@@ -5,9 +5,9 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, StringConstraints
 from sse_starlette.sse import EventSourceResponse
 
@@ -21,7 +21,7 @@ from backend.translator.pipeline import (
     JobAlreadyRunningError,
     TranslationPipeline,
 )
-from backend.translator.storage import FileStorage
+from backend.translator.storage import FileStorage, StorageIntegrityError
 
 
 try:
@@ -102,6 +102,14 @@ def _public_api_settings(config) -> dict[str, str | bool]:
 
 def _error_detail(code: str, message: str, retryable: bool = False) -> dict[str, str | bool]:
     return {"code": code, "message": message, "retryable": retryable}
+
+
+@app.exception_handler(StorageIntegrityError)
+async def handle_storage_integrity_error(_request: Request, exc: StorageIntegrityError):
+    return JSONResponse(
+        status_code=409,
+        content={"detail": _error_detail("JOB_DATA_CORRUPT", str(exc), retryable=False)},
+    )
 
 
 def _job_not_found(exc: FileNotFoundError) -> HTTPException:

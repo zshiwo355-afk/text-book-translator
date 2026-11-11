@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -88,6 +90,9 @@ def _nonnegative_float(value: str) -> float:
 
 
 def _state_path() -> Path:
+    state_dir = os.environ.get("BOOK_TRANSLATOR_STATE_DIR")
+    if state_dir:
+        return Path(state_dir).expanduser() / "jobs.json"
     hermes_home = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
     return hermes_home / "state" / "book-translator" / "jobs.json"
 
@@ -657,8 +662,8 @@ def _stream_download(
     *,
     api_url: str,
     timeout: float,
-    expected_size: int | None,
-    expected_sha256: str | None,
+    expected_size: int,
+    expected_sha256: str,
 ) -> tuple[int, str]:
     request = urllib.request.Request(url, headers={"Accept": "*/*", "User-Agent": USER_AGENT})
     tmp_path: Path | None = None
@@ -685,14 +690,34 @@ def _stream_download(
                 handle.flush()
                 os.fsync(handle.fileno())
         actual_sha256 = digest.hexdigest()
-        if expected_size is not None and size != expected_size:
+        if size != expected_size:
             raise ClientError(
                 "OUTPUT_SIZE_MISMATCH",
                 f"Downloaded {size} bytes but the manifest expected {expected_size}.",
             )
-        if expected_sha256 and actual_sha256.lower() != expected_sha256.lower():
+        if actual_sha256.lower() != expected_sha256.lower():
             raise ClientError("OUTPUT_CHECKSUM_MISMATCH", "Downloaded output failed checksum verification.")
-        os.replace(tmp_path, destination)
+        # Publish exclusively: concurrent downloads must never overwrite a result.
+        try:
+            os.link(tmp_path, destination)
+        except OSError as exc:
+            if exc.errno not in {errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS} and getattr(exc, "winerror", None) not in {1, 50}:
+                raise
+            # shortcut: filesystems without hard links require a copy; power loss
+            # or process termination during this fallback can leave a partial file.
+            created = False
+            try:
+                with destination.open("xb") as output:
+                    created = True
+                    with tmp_path.open("rb") as source:
+                        shutil.copyfileobj(source, output)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except BaseException:
+                if created:
+                    destination.unlink(missing_ok=True)
+                raise
+        tmp_path.unlink()
         tmp_path = None
         return size, actual_sha256
     except urllib.error.HTTPError as exc:
@@ -704,6 +729,8 @@ def _stream_download(
         ) from exc
     except TimeoutError as exc:
         raise ClientError("DOWNLOAD_TIMEOUT", "Translation output download timed out.", exit_code=4) from exc
+    except FileExistsError as exc:
+        raise ClientError("OUTPUT_PATH_BUSY", "Another download created this output; retry the download.") from exc
     finally:
         if tmp_path is not None and tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
@@ -713,6 +740,17 @@ def command_download(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     job_id = _resolve_job_id(args.job_id)
     job = _get_job(args, job_id)
     output = _find_output(job, args.output_type)
+    expected_size = output.get("size_bytes")
+    expected_sha256 = output.get("sha256")
+    if (
+        type(expected_size) is not int or expected_size < 0
+        or not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+        or any(char not in "0123456789abcdefABCDEF" for char in expected_sha256)
+    ):
+        raise ClientError(
+            "INVALID_OUTPUT_MANIFEST",
+            "Output manifest requires a nonnegative integer size_bytes and a 64-digit hexadecimal sha256.",
+        )
     output_dir = Path(args.output_dir).expanduser()
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -727,10 +765,6 @@ def command_download(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if not isinstance(download_url, str) or not download_url.strip():
         raise ClientError("INVALID_RESPONSE", "Output manifest is missing download_url.")
     resolved_url = _same_origin_url(args.api_url, download_url)
-    size_value = output.get("size_bytes")
-    expected_size = int(size_value) if isinstance(size_value, int) and size_value >= 0 else None
-    sha_value = output.get("sha256")
-    expected_sha256 = str(sha_value) if sha_value else None
     size, actual_sha256 = _stream_download(
         resolved_url,
         destination,
